@@ -137,7 +137,8 @@ async def get_collection_info(collection_id: str):
 async def search_data(
     query: str,
     limit: int = 10,
-    offset: int = 0,
+    startIndex: int = 1,
+    page: int = 1,
     collections: Optional[str] = None
 ):
     """Search for geospatial data across all collections using STAC search.
@@ -145,7 +146,8 @@ async def search_data(
     Args:
         query: Search query string (free text search)
         limit: Maximum number of results to return (default: 10)
-        offset: Number of results to skip for pagination (default: 0)
+        startIndex: Index of the first result to return (default: 1)
+        page: Page number for pagination (default: 1)
         collections: Comma-separated collection IDs to limit search
     
     Returns:
@@ -156,14 +158,17 @@ async def search_data(
             return {"error": True, "message": "Search query cannot be empty"}
         if limit < 1 or limit > 1000:
             return {"error": True, "message": "Limit must be between 1 and 1000"}
-        if offset < 0:
-            return {"error": True, "message": "Offset must be non-negative"}
+        if startIndex < 1:
+            return {"error": True, "message": "startIndex must be >= 1"}
+        if page < 1:
+            return {"error": True, "message": "page must be >= 1"}
             
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
             params = {
                 "q": query,
                 "limit": limit,
-                "offset": offset,
+                "startIndex": startIndex,
+                "page": page,
             }
             if collections:
                 params["collections"] = collections
