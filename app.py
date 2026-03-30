@@ -1,15 +1,74 @@
 import httpx
+import os
 from fastmcp import FastMCP
 from typing import Optional, Dict, Any
+from datetime import datetime, timedelta
 
 
-app = FastMCP("eddie-resto-server")
+app = FastMCP("eddie-mcp-server")
 
-# Base URL for the resto API
-RESTO_API_BASE = "https://api.staging.edito.eu/data"
+# Base URLs (configurable via environment variables)
+EDITO_API_BASE = os.getenv("EDITO_API_BASE", "https://api.staging.edito.eu/data")
+OAUTH2_TOKEN_URL = os.getenv("OAUTH2_TOKEN_URL", "https://auth.staging.edito.eu/auth/realms/datalab/protocol/openid-connect/token")
 
 # Request timeout in seconds
 REQUEST_TIMEOUT = 30
+
+# OAuth2 credentials from environment
+OAUTH2_CLIENT_ID = os.getenv("OAUTH2_CLIENT_ID")
+OAUTH2_USERNAME = os.getenv("OAUTH2_USERNAME")
+OAUTH2_PASSWORD = os.getenv("OAUTH2_PASSWORD")
+
+# Token cache
+_cached_token = None
+_token_expires_at = None
+
+
+async def get_oauth2_token() -> Optional[str]:
+    """Get OAuth2 access token using password grant flow."""
+    global _cached_token, _token_expires_at
+    
+    # Check if cached token is still valid
+    if _cached_token and _token_expires_at:
+        if datetime.now() < _token_expires_at:
+            return _cached_token
+    
+    # Get new token if credentials are available
+    if not OAUTH2_CLIENT_ID or not OAUTH2_USERNAME or not OAUTH2_PASSWORD:
+        return None
+    
+    try:
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+            data = {
+                "client_id": OAUTH2_CLIENT_ID,
+                "username": OAUTH2_USERNAME,
+                "password": OAUTH2_PASSWORD,
+                "grant_type": "password",
+                "scope": "openid"
+            }
+            
+            response = await client.post(OAUTH2_TOKEN_URL, data=data)
+            response.raise_for_status()
+            token_response = response.json()
+            
+            # Extract access token and expiration
+            access_token = token_response.get("access_token")
+            expires_in = token_response.get("expires_in", 3600)  # Default 1 hour
+            
+            if access_token:
+                # Cache token with slight buffer (reduce by 5 minutes)
+                _cached_token = access_token
+                _token_expires_at = datetime.now() + timedelta(seconds=expires_in - 300)
+                return access_token
+            
+            return None
+    except Exception:
+        return None
+
+
+async def get_cached_token() -> Optional[str]:
+    """Get cached authentication token, refreshing if expired."""
+    return await get_oauth2_token()
 
 
 def handle_error(error: Exception, context: str) -> Dict[str, Any]:
@@ -29,7 +88,7 @@ def handle_error(error: Exception, context: str) -> Dict[str, Any]:
             "error": True,
             "context": context,
             "status_code": error.response.status_code,
-            "message": f"API returned {error.response.status_code}: {error_msg}",
+            "message": f"Edito API returned {error.response.status_code}: {error_msg}",
             "details": error.response.text[:500] if error.response.text else None
         }
     elif isinstance(error, httpx.ConnectError):
@@ -37,7 +96,7 @@ def handle_error(error: Exception, context: str) -> Dict[str, Any]:
             "error": True,
             "context": context,
             "type": "CONNECTION_ERROR",
-            "message": f"Failed to connect to resto API: {error_msg}",
+            "message": f"Failed to connect to Edito API: {error_msg}",
             "hint": "Check if the API is reachable"
         }
     elif isinstance(error, httpx.TimeoutException):
@@ -63,18 +122,69 @@ def handle_error(error: Exception, context: str) -> Dict[str, Any]:
 
 @app.tool()
 async def get_auth_token():
-    """Get a fresh authentication token (rJWT) from the resto API.
+    """Get OAuth2 access token from the authentication server.
+    
+    If credentials are configured, fetches a fresh token from the OAuth2 endpoint.
+    Token is cached for the duration of its validity.
     
     Returns:
-        dict: Contains 'token' and 'profile' information
+        dict: Contains 'access_token' and token metadata
     """
     try:
-        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-            response = await client.get(f"{RESTO_API_BASE}/auth")
-            response.raise_for_status()
-            return response.json()
+        token = await get_oauth2_token()
+        if token:
+            return {
+                "access_token": token,
+                "token_type": "Bearer",
+                "authenticated": True,
+                "cached": True,
+                "expires_at": _token_expires_at.isoformat() if _token_expires_at else None
+            }
+        else:
+            return {
+                "error": True,
+                "message": "No credentials configured. Set OAUTH2_CLIENT_ID, OAUTH2_USERNAME, OAUTH2_PASSWORD in MCP config."
+            }
     except Exception as e:
-        return handle_error(e, "Getting authentication token")
+        return handle_error(e, "Getting OAuth2 token")
+
+
+@app.tool()
+async def check_auth_status():
+    """Check if OAuth2 authentication is configured and valid.
+    
+    Returns:
+        dict: Authentication status information
+    """
+    if not OAUTH2_CLIENT_ID or not OAUTH2_USERNAME or not OAUTH2_PASSWORD:
+        return {
+            "authenticated": False,
+            "message": "Incomplete credentials. Configure OAUTH2_CLIENT_ID, OAUTH2_USERNAME, and OAUTH2_PASSWORD.",
+            "configured": False
+        }
+    
+    try:
+        token = await get_oauth2_token()
+        if token:
+            return {
+                "authenticated": True,
+                "configured": True,
+                "message": "Successfully authenticated with OAuth2",
+                "token_cached": True,
+                "token_expires_at": _token_expires_at.isoformat() if _token_expires_at else None
+            }
+        else:
+            return {
+                "authenticated": False,
+                "configured": True,
+                "message": "Failed to authenticate with provided OAuth2 credentials"
+            }
+    except Exception as e:
+        return {
+            "authenticated": False,
+            "configured": True,
+            "error": str(e)
+        }
 
 
 # ============================================================================
@@ -83,7 +193,7 @@ async def get_auth_token():
 
 @app.tool()
 async def list_collections(limit: int = 50, offset: int = 0):
-    """List all available collections in the resto catalog.
+    """List all available collections in the EDITO catalog.
     
     Args:
         limit: Maximum number of collections to return (default: 50)
@@ -100,7 +210,7 @@ async def list_collections(limit: int = 50, offset: int = 0):
             
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
             params = {"limit": limit, "offset": offset}
-            response = await client.get(f"{RESTO_API_BASE}/collections", params=params)
+            response = await client.get(f"{EDITO_API_BASE}/collections", params=params)
             response.raise_for_status()
             return response.json()
     except Exception as e:
@@ -109,7 +219,7 @@ async def list_collections(limit: int = 50, offset: int = 0):
 
 @app.tool()
 async def get_collection_info(collection_id: str):
-    """Get detailed information about a specific collection in resto.
+    """Get detailed information about a specific collection in EDITO.
     
     Args:
         collection_id: The ID of the collection
@@ -122,7 +232,7 @@ async def get_collection_info(collection_id: str):
             return {"error": True, "message": "collection_id cannot be empty"}
             
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-            response = await client.get(f"{RESTO_API_BASE}/collections/{collection_id}")
+            response = await client.get(f"{EDITO_API_BASE}/collections/{collection_id}")
             response.raise_for_status()
             return response.json()
     except Exception as e:
@@ -173,7 +283,7 @@ async def search_data(
             if collections:
                 params["collections"] = collections
                 
-            response = await client.get(f"{RESTO_API_BASE}/search", params=params)
+            response = await client.get(f"{EDITO_API_BASE}/search", params=params)
             response.raise_for_status()
             return response.json()
     except Exception as e:
@@ -226,7 +336,7 @@ async def search_collection_features(
                 params["bbox"] = bbox
                 
             response = await client.get(
-                f"{RESTO_API_BASE}/collections/{collection_id}/items",
+                f"{EDITO_API_BASE}/collections/{collection_id}/items",
                 params=params
             )
             response.raise_for_status()
@@ -254,7 +364,7 @@ async def get_feature_details(collection_id: str, feature_id: str):
             
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
             response = await client.get(
-                f"{RESTO_API_BASE}/collections/{collection_id}/items/{feature_id}"
+                f"{EDITO_API_BASE}/collections/{collection_id}/items/{feature_id}"
             )
             response.raise_for_status()
             return response.json()
@@ -265,6 +375,30 @@ async def get_feature_details(collection_id: str, feature_id: str):
 # ============================================================================
 # USER TOOLS
 # ============================================================================
+
+@app.tool()
+async def get_my_profile():
+    """Get the authenticated user's own profile (requires authentication).
+    
+    Returns:
+        dict: Current user profile information
+    """
+    try:
+        token = await get_cached_token()
+        if not token:
+            return {
+                "error": True,
+                "message": "Not authenticated. Configure EDITO_USERNAME and EDITO_PASSWORD in MCP server config."
+            }
+        
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+            headers = {"Authorization": f"Bearer {token}"}
+            response = await client.get(f"{EDITO_API_BASE}/me", headers=headers)
+            response.raise_for_status()
+            return response.json()
+    except Exception as e:
+        return handle_error(e, "Getting authenticated user profile")
+
 
 @app.tool()
 async def get_user_profile(username: str):
@@ -279,9 +413,19 @@ async def get_user_profile(username: str):
     try:
         if not username or not username.strip():
             return {"error": True, "message": "username cannot be empty"}
-            
+        
+        # Try with authentication first if available
+        token = await get_cached_token()
+        
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-            response = await client.get(f"{RESTO_API_BASE}/users/{username}")
+            headers = {}
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            
+            response = await client.get(
+                f"{EDITO_API_BASE}/users/{username}",
+                headers=headers if headers else None
+            )
             response.raise_for_status()
             return response.json()
     except Exception as e:
@@ -289,32 +433,30 @@ async def get_user_profile(username: str):
 
 
 @app.tool()
-async def get_user_collections(username: str, limit: int = 50):
-    """Get all collections owned by a specific user.
+async def get_users():
+    """Get all users.
     
-    Args:
-        username: The username whose collections to retrieve
-        limit: Maximum number of collections to return (default: 50)
+    Requires authentication for full access to user list.
     
     Returns:
-        dict: List of collections owned by the user
+        dict: List of users with their profile information
     """
     try:
-        if not username or not username.strip():
-            return {"error": True, "message": "username cannot be empty"}
-        if limit < 1 or limit > 1000:
-            return {"error": True, "message": "Limit must be between 1 and 1000"}
-            
+        token = await get_cached_token()
+        
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-            params = {"limit": limit}
+            headers = {}
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            
             response = await client.get(
-                f"{RESTO_API_BASE}/users/{username}/collections",
-                params=params
+                f"{EDITO_API_BASE}/users",
+                headers=headers if headers else None
             )
             response.raise_for_status()
             return response.json()
     except Exception as e:
-        return handle_error(e, f"Getting collections for user '{username}'")
+        return handle_error(e, "Getting users list")
 
 
 @app.tool()
@@ -326,19 +468,26 @@ async def get_user_features(username: str, limit: int = 50):
         limit: Maximum number of features to return (default: 50)
     
     Returns:
-        dict: GeoJSON FeatureCollection of user's features
+        dict: GeoJSON FeatureCollection of user's features (requires authentication)
     """
     try:
         if not username or not username.strip():
             return {"error": True, "message": "username cannot be empty"}
         if limit < 1 or limit > 1000:
             return {"error": True, "message": "Limit must be between 1 and 1000"}
-            
+        
+        token = await get_cached_token()
+        
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+            headers = {}
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            
             params = {"limit": limit}
             response = await client.get(
-                f"{RESTO_API_BASE}/users/{username}/features",
-                params=params
+                f"{EDITO_API_BASE}/users/{username}/features",
+                params=params,
+                headers=headers if headers else None
             )
             response.raise_for_status()
             return response.json()
@@ -366,7 +515,7 @@ async def list_groups(limit: int = 50):
             
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
             params = {"limit": limit}
-            response = await client.get(f"{RESTO_API_BASE}/groups", params=params)
+            response = await client.get(f"{EDITO_API_BASE}/groups", params=params)
             response.raise_for_status()
             return response.json()
     except Exception as e:
@@ -388,7 +537,7 @@ async def get_group_info(group_name: str):
             return {"error": True, "message": "group_name cannot be empty"}
             
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-            response = await client.get(f"{RESTO_API_BASE}/groups/{group_name}")
+            response = await client.get(f"{EDITO_API_BASE}/groups/{group_name}")
             response.raise_for_status()
             return response.json()
     except Exception as e:
@@ -408,7 +557,7 @@ async def get_stac_queryables():
     """
     try:
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-            response = await client.get(f"{RESTO_API_BASE}/queryables")
+            response = await client.get(f"{EDITO_API_BASE}/queryables")
             response.raise_for_status()
             return response.json()
     except Exception as e:
@@ -417,14 +566,14 @@ async def get_stac_queryables():
 
 @app.tool()
 async def get_landing_page():
-    """Get the resto landing page with API endpoints and available resources.
+    """Get the Edito landing page with API endpoints and available resources.
     
     Returns:
         dict: Landing page with links to collections, search, and other endpoints
     """
     try:
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-            response = await client.get(RESTO_API_BASE)
+            response = await client.get(EDITO_API_BASE)
             response.raise_for_status()
             return response.json()
     except Exception as e:

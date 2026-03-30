@@ -1,0 +1,39 @@
+services:
+  eddie-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: eddie-mcp-service
+    ports:
+      - "8000:8000"
+    environment:
+      # OAuth2 Configuration - set these in your environment
+      - OAUTH2_CLIENT_ID=${OAUTH2_CLIENT_ID:-}
+      - OAUTH2_USERNAME=${OAUTH2_USERNAME:-}
+      - OAUTH2_PASSWORD=${OAUTH2_PASSWORD:-}
+      - EDITO_API_BASE=${EDITO_API_BASE:-https://api.staging.edito.eu/data}
+      - OAUTH2_TOKEN_URL=${OAUTH2_TOKEN_URL:-https://auth.staging.edito.eu/auth/realms/datalab/protocol/openid-connect/token}
+      # Server Configuration
+      - HOST=0.0.0.0
+      - PORT=8000
+      - REQUEST_TIMEOUT=30
+      - DEBUG=false
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    # Uncomment for production with proper logging
+    # logging:
+    #   driver: "json-file"
+    #   options:
+    #     max-size: "10m"
+    #     max-file: "3"
+    networks:
+      - eddie-network
+
+networks:
+  eddie-network:
+    driver: bridge
