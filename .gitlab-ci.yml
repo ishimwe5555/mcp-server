@@ -26,5 +26,6 @@ build_and_push_to_nexus:
       fi
   only:
     - master
+    - main
     - tags
     - ft-mcp-eddie
