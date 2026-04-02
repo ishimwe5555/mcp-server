@@ -27,4 +27,3 @@ build_and_push_to_nexus:
   only:
     - master
     - tags
-    - ft-mcp-eddie
