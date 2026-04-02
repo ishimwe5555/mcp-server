@@ -21,7 +21,7 @@ build_and_push_to_nexus:
         echo "Image already exists on Nexus: ${IMAGE_FULL}:${IMAGE_TAG}"
       else
         echo "Building new image: ${IMAGE_FULL}:${IMAGE_TAG}"
-        docker build -f ./build/resto/Dockerfile --ulimit nofile=65536:65536 --tag ${IMAGE_FULL}:${IMAGE_TAG} --build-arg REGISTRY="https://${NEXUS_REGISTRY}/" --platform linux/amd64 .
+        docker build -f ./Dockerfile --ulimit nofile=65536:65536 --tag ${IMAGE_FULL}:${IMAGE_TAG} --build-arg REGISTRY="https://${NEXUS_REGISTRY}/" --platform linux/amd64 .
         docker push ${IMAGE_FULL}:${IMAGE_TAG}
       fi
   only:
