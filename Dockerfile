@@ -16,7 +16,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY app.py .
 COPY service.py .
-COPY resto-api.json .
 
 # Environment variables (can be overridden at runtime)
 ENV PYTHONUNBUFFERED=1
