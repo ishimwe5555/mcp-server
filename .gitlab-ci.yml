@@ -25,5 +25,5 @@ build_and_push_to_nexus:
         docker push ${IMAGE_FULL}:${IMAGE_TAG}
       fi
   only:
-    - master
+    - main
     - tags

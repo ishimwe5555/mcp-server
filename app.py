@@ -246,7 +246,7 @@ async def get_collection_info(collection_id: str):
 @app.tool()
 async def search_data(
     query: str,
-    limit: int = 10,
+    limit: int = 50,
     startIndex: int = 1,
     page: int = 1,
     collections: Optional[str] = None
@@ -255,7 +255,7 @@ async def search_data(
     
     Args:
         query: Search query string (free text search)
-        limit: Maximum number of results to return (default: 10)
+        limit: Maximum number of results to return (default: 50)
         startIndex: Index of the first result to return (default: 1)
         page: Page number for pagination (default: 1)
         collections: Comma-separated collection IDs to limit search
@@ -294,7 +294,7 @@ async def search_data(
 async def search_collection_features(
     collection_id: str,
     query: Optional[str] = None,
-    limit: int = 10,
+    limit: int = 50,
     offset: int = 0,
     bbox: Optional[str] = None
 ):
@@ -303,7 +303,7 @@ async def search_collection_features(
     Args:
         collection_id: The collection ID to search in
         query: Free text search query (optional)
-        limit: Maximum number of results (default: 10)
+        limit: Maximum number of results (default: 50)
         offset: Number of results to skip (default: 0)
         bbox: Bounding box in format 'minLon,minLat,maxLon,maxLat' (optional)
     
@@ -581,4 +581,5 @@ async def get_landing_page():
 
 
 if __name__ == "__main__":
-    app.run()
+    app.run(transport="http", host="0.0.0.0", port=8000)
+
