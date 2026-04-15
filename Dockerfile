@@ -15,7 +15,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY app.py .
-COPY service.py .
 
 # Environment variables (can be overridden at runtime)
 ENV PYTHONUNBUFFERED=1
@@ -31,4 +30,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 EXPOSE 8000
 
 # Start the service
-CMD ["python", "service.py"]
+CMD ["python", "app.py"]
