@@ -7,12 +7,8 @@ services:
     ports:
       - "8000:8000"
     environment:
-      # OAuth2 Configuration - set these in your environment
-      - OAUTH2_CLIENT_ID=${OAUTH2_CLIENT_ID:-}
-      - OAUTH2_USERNAME=${OAUTH2_USERNAME:-}
-      - OAUTH2_PASSWORD=${OAUTH2_PASSWORD:-}
+      # EDITO API Configuration
       - EDITO_API_BASE=${EDITO_API_BASE:-https://api.staging.edito.eu/data}
-      - OAUTH2_TOKEN_URL=${OAUTH2_TOKEN_URL:-https://auth.staging.edito.eu/auth/realms/datalab/protocol/openid-connect/token}
       # Server Configuration
       - HOST=0.0.0.0
       - PORT=8000

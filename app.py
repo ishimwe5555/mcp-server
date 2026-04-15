@@ -4,71 +4,139 @@ from fastmcp import FastMCP
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
 
-
 app = FastMCP("eddie-mcp-server")
 
-# Base URLs (configurable via environment variables)
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+
+# Base URL (configurable via environment variable)
 EDITO_API_BASE = os.getenv("EDITO_API_BASE", "https://api.staging.edito.eu/data")
-OAUTH2_TOKEN_URL = os.getenv("OAUTH2_TOKEN_URL", "https://auth.staging.edito.eu/auth/realms/datalab/protocol/openid-connect/token")
 
 # Request timeout in seconds
 REQUEST_TIMEOUT = 30
 
-# OAuth2 credentials from environment
-OAUTH2_CLIENT_ID = os.getenv("OAUTH2_CLIENT_ID")
-OAUTH2_USERNAME = os.getenv("OAUTH2_USERNAME")
-OAUTH2_PASSWORD = os.getenv("OAUTH2_PASSWORD")
-
-# Token cache
-_cached_token = None
-_token_expires_at = None
+# Global user tracking - stores the currently authenticated user ID
+_current_user_id: Optional[str] = None
 
 
-async def get_oauth2_token() -> Optional[str]:
-    """Get OAuth2 access token using password grant flow."""
-    global _cached_token, _token_expires_at
+# ============================================================================
+# SESSION MANAGEMENT
+# ============================================================================
+
+class SessionTokenStore:
+    """Per-user token storage with expiration tracking."""
     
-    # Check if cached token is still valid
-    if _cached_token and _token_expires_at:
-        if datetime.now() < _token_expires_at:
-            return _cached_token
+    def __init__(self):
+        self._sessions: Dict[str, Dict[str, Any]] = {}
     
-    # Get new token if credentials are available
-    if not OAUTH2_CLIENT_ID or not OAUTH2_USERNAME or not OAUTH2_PASSWORD:
+    def set_token(self, user_id: str, token: str, expires_at: datetime) -> None:
+        """Store token for a user."""
+        self._sessions[user_id] = {
+            "token": token,
+            "expires_at": expires_at,
+            "created_at": datetime.now()
+        }
+    
+    def get_token(self, user_id: str) -> Optional[str]:
+        """Retrieve token if still valid."""
+        if user_id not in self._sessions:
+            return None
+        
+        session = self._sessions[user_id]
+        token = session.get("token")
+        expires_at = session.get("expires_at")
+        
+        # Check if token is still valid
+        if token and expires_at and datetime.now() < expires_at:
+            return token
+        
         return None
     
+    def clear_session(self, user_id: str) -> None:
+        """Clear a user's session and token."""
+        if user_id in self._sessions:
+            del self._sessions[user_id]
+
+
+# Global session store
+_session_store = SessionTokenStore()
+
+
+# ============================================================================
+# AUTHENTICATION & ERROR HANDLING
+# ============================================================================
+
+def extract_user_id_from_token(token: str) -> Optional[str]:
+    """Extract user ID from JWT token's 'sub' claim.
+    
+    Args:
+        token: JWT access token
+    
+    Returns:
+        User ID from token's 'sub' claim, or None if unable to extract
+    """
     try:
-        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-            data = {
-                "client_id": OAUTH2_CLIENT_ID,
-                "username": OAUTH2_USERNAME,
-                "password": OAUTH2_PASSWORD,
-                "grant_type": "password",
-                "scope": "openid"
-            }
-            
-            response = await client.post(OAUTH2_TOKEN_URL, data=data)
-            response.raise_for_status()
-            token_response = response.json()
-            
-            # Extract access token and expiration
-            access_token = token_response.get("access_token")
-            expires_in = token_response.get("expires_in", 3600)  # Default 1 hour
-            
-            if access_token:
-                # Cache token with slight buffer (reduce by 5 minutes)
-                _cached_token = access_token
-                _token_expires_at = datetime.now() + timedelta(seconds=expires_in - 300)
-                return access_token
-            
+        import json
+        import base64
+        
+        # JWT format: header.payload.signature
+        parts = token.split('.')
+        if len(parts) != 3:
             return None
+        
+        # Decode payload (add padding if needed)
+        payload = parts[1]
+        padding = 4 - len(payload) % 4
+        if padding != 4:
+            payload += '=' * padding
+        
+        decoded = base64.urlsafe_b64decode(payload)
+        data = json.loads(decoded)
+        
+        # Extract user ID from common JWT claims
+        return data.get('sub') or data.get('preferred_username') or data.get('email')
     except Exception:
         return None
 
 
+async def initialize_session_token(user_id: str, token: str) -> None:
+    """Store a validated token for a user.
+    
+    Args:
+        user_id: User identifier from token
+        token: Valid OAuth2 access token
+    """
+    # Assume token is valid for 1 hour if not otherwise specified
+    expires_at = datetime.now() + timedelta(hours=1)
+    _session_store.set_token(user_id, token, expires_at)
+
+
 async def get_cached_token() -> Optional[str]:
-    """Get cached authentication token, refreshing if expired."""
-    return await get_oauth2_token()
+    """Get cached authentication token for current user.
+    
+    Returns the token if it's still valid, None otherwise.
+    """
+    global _current_user_id
+    if not _current_user_id:
+        return None
+    
+    return _session_store.get_token(_current_user_id)
+
+
+async def refresh_token(token: str, expires_in: int = 3600) -> None:
+    """Refresh/update the token for current user.
+    
+    Args:
+        token: New access token
+        expires_in: Token TTL in seconds (default: 1 hour)
+    """
+    global _current_user_id
+    if not _current_user_id:
+        raise ValueError("No user authenticated")
+    
+    expires_at = datetime.now() + timedelta(seconds=expires_in - 300)  # 5 min buffer
+    _session_store.set_token(_current_user_id, token, expires_at)
 
 
 def handle_error(error: Exception, context: str) -> Dict[str, Any]:
@@ -117,74 +185,141 @@ def handle_error(error: Exception, context: str) -> Dict[str, Any]:
 
 
 # ============================================================================
-# AUTHENTICATION TOOLS
+# ROUTES & SESSION MANAGEMENT
+# ============================================================================
+
+@app.custom_route("/health", methods=["GET"])
+async def health(request):
+    """Health check endpoint."""
+    from starlette.responses import JSONResponse
+    return JSONResponse({"status": "healthy"})
+
+
+@app.custom_route("/tools", methods=["GET"])
+async def list_tools_endpoint(request):
+    """List all available MCP tools with their descriptions."""
+    from starlette.responses import JSONResponse
+    import service
+    import inspect
+    
+    tools_info = []
+    
+    # Get all functions from service module that are decorated with @app.tool()
+    for name, obj in inspect.getmembers(service):
+        if inspect.iscoroutinefunction(obj) and not name.startswith('_'):
+            tools_info.append({
+                "name": name,
+                "description": (obj.__doc__ or "No description available").split('\n')[0]
+            })
+    
+    return JSONResponse({
+        "count": len(tools_info),
+        "tools": sorted(tools_info, key=lambda x: x["name"])
+    })
+
+
+# ============================================================================
+# SESSION-BASED AUTHENTICATION TOOLS
 # ============================================================================
 
 @app.tool()
-async def get_auth_token():
-    """Get OAuth2 access token from the authentication server.
+async def init_session(access_token: str) -> Dict[str, Any]:
+    """Initialize a new session with a user's OAuth2 access token.
     
-    If credentials are configured, fetches a fresh token from the OAuth2 endpoint.
-    Token is cached for the duration of its validity.
+    **CALL THIS FIRST** - validates and stores the access token for all subsequent API calls.
+    
+    The token is validated immediately by making a test call to the API. Once validated,
+    all subsequent tool calls will use this token automatically.
+    
+    Typical flow:
+    1. User obtains their access token from OAuth2 provider
+    2. Call init_session with that token
+    3. All subsequent tool calls will use this token
+    
+    Args:
+        access_token: Valid OAuth2 access token for the EDITO API
     
     Returns:
-        dict: Contains 'access_token' and token metadata
+        dict: Session initialization status with user information
     """
+    global _current_user_id
     try:
-        token = await get_oauth2_token()
-        if token:
+        # Extract user ID from token
+        user_id = extract_user_id_from_token(access_token)
+        if not user_id:
             return {
-                "access_token": token,
-                "token_type": "Bearer",
-                "authenticated": True,
-                "cached": True,
-                "expires_at": _token_expires_at.isoformat() if _token_expires_at else None
-            }
-        else:
-            return {
+                "success": False,
                 "error": True,
-                "message": "No credentials configured. Set OAUTH2_CLIENT_ID, OAUTH2_USERNAME, OAUTH2_PASSWORD in MCP config."
+                "message": "Could not extract user ID from token",
+                "details": "The token format is invalid or missing required claims"
             }
+        
+        # Validate the token by making a test call
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+            headers = {"Authorization": f"Bearer {access_token}"}
+            response = await client.get(f"{EDITO_API_BASE}/me", headers=headers)
+            response.raise_for_status()
+            user_info = response.json()
+        
+        # Token is valid, store it and set current user
+        await initialize_session_token(user_id, access_token)
+        _current_user_id = user_id
+        
+        return {
+            "success": True,
+            "user_id": user_id,
+            "user_info": user_info,
+            "message": f"Session initialized for user {user_id}. All subsequent API calls will use this token.",
+            "note": "Token automatically used by all tools until expired or replaced"
+        }
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code in (401, 403):
+            return {
+                "success": False,
+                "error": True,
+                "message": f"Token validation failed (HTTP {e.response.status_code})",
+                "details": "The provided token is invalid, expired, or lacks required permissions",
+                "suggested_action": "Verify the token and try again with a valid OAuth2 access token"
+            }
+        return handle_error(e, "Initializing session")
     except Exception as e:
-        return handle_error(e, "Getting OAuth2 token")
+        return handle_error(e, "Initializing session")
 
 
 @app.tool()
-async def check_auth_status():
-    """Check if OAuth2 authentication is configured and valid.
+async def check_session_auth() -> Dict[str, Any]:
+    """Check if current session has a valid authentication token.
     
     Returns:
-        dict: Authentication status information
+        dict: Current session auth status
     """
-    if not OAUTH2_CLIENT_ID or not OAUTH2_USERNAME or not OAUTH2_PASSWORD:
-        return {
-            "authenticated": False,
-            "message": "Incomplete credentials. Configure OAUTH2_CLIENT_ID, OAUTH2_USERNAME, and OAUTH2_PASSWORD.",
-            "configured": False
-        }
-    
+    global _current_user_id
     try:
-        token = await get_oauth2_token()
-        if token:
+        token = await get_cached_token()
+        
+        if token and _current_user_id:
             return {
                 "authenticated": True,
-                "configured": True,
-                "message": "Successfully authenticated with OAuth2",
-                "token_cached": True,
-                "token_expires_at": _token_expires_at.isoformat() if _token_expires_at else None
+                "user_id": _current_user_id,
+                "has_token": True,
+                "message": "Session has valid authentication token"
+            }
+        elif _current_user_id:
+            return {
+                "authenticated": False,
+                "user_id": _current_user_id,
+                "has_token": False,
+                "message": "Session exists but token is expired. Call init_session with a fresh token."
             }
         else:
             return {
                 "authenticated": False,
-                "configured": True,
-                "message": "Failed to authenticate with provided OAuth2 credentials"
+                "user_id": None,
+                "has_token": False,
+                "message": "No session initialized. Call init_session first."
             }
     except Exception as e:
-        return {
-            "authenticated": False,
-            "configured": True,
-            "error": str(e)
-        }
+        return handle_error(e, "Checking session authentication")
 
 
 # ============================================================================
@@ -200,7 +335,7 @@ async def list_collections(limit: int = 50, offset: int = 0):
         offset: Number of results to skip for pagination (default: 0)
     
     Returns:
-        dict: List of collection metadata and statistics
+        dict: Summarized collection metadata - total count, and slim collection list
     """
     try:
         if limit < 1 or limit > 1000:
@@ -212,7 +347,35 @@ async def list_collections(limit: int = 50, offset: int = 0):
             params = {"limit": limit, "offset": offset}
             response = await client.get(f"{EDITO_API_BASE}/collections", params=params)
             response.raise_for_status()
-            return response.json()
+            data = response.json()
+
+        # Extract top-level total from links
+        total_matched = None
+        for link in data.get("links", []):
+            if link.get("rel") == "items" and "matched" in link:
+                total_matched = link["matched"]
+                break
+
+        # Slim down each collection: drop verbose description, keep essentials
+        slim_collections = []
+        for link in data.get("links", []):
+            if link.get("rel") != "child":
+                continue
+            slim_collections.append({
+                "title": link.get("title"),
+                "id": link.get("href", "").split("/collections/")[-1],
+                "matched": link.get("matched"),
+                "description": (link.get("description") or "")[:120].rstrip() + "…"
+                    if link.get("description") else None,
+            })
+
+        return {
+            "total_collections": total_matched,
+            "returned": len(slim_collections),
+            "offset": offset,
+            "collections": slim_collections,
+        }
+
     except Exception as e:
         return handle_error(e, "Listing collections")
 
@@ -388,7 +551,7 @@ async def get_my_profile():
         if not token:
             return {
                 "error": True,
-                "message": "Not authenticated. Configure EDITO_USERNAME and EDITO_PASSWORD in MCP server config."
+                "message": "Not authenticated. Call init_session first with a valid OAuth2 access token."
             }
         
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
@@ -582,4 +745,3 @@ async def get_landing_page():
 
 if __name__ == "__main__":
     app.run(transport="http", host="0.0.0.0", port=8000)
-
